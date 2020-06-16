@@ -6,5 +6,8 @@
   :dependencies [[org.clojure/clojure "1.10.1"]
                  [org.clojure/data.json "1.0.0"]
                  [org.clojure/tools.cli "1.0.194"]
-                 [exogenous "0.1.0-SNAPSHOT"]]
-  :repl-options {:init-ns exogenous-abs.core})
+                 [exogenous "0.1.0-SNAPSHOT"]
+                 [org.clojure/core.async "1.2.603"]]
+  :profiles {:uberjar {:aot [exogenous-abs.core]}}
+  :repl-options {:init-ns exogenous-abs.core}
+  :main exogenous-abs.core)
