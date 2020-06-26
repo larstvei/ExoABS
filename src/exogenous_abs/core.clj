@@ -10,14 +10,15 @@
             [exogenous.relations :as rels]))
 
 (defn linerize-trace [seed-trace domain mhb]
-  (let [local-occurs-before (for [[i [cog1 & _ :as e1]] domain
-                                  [j [cog2 & _ :as e2]] domain
+  (let [local-occurs-before (for [[i [_ cog1 & _ :as e1]] domain
+                                  [j [_ cog2 & _ :as e2]] domain
                                   :when (and (= cog1 cog2) (< i j))]
                               [e1 e2])
         strict-hb (-> (into mhb local-occurs-before)
                       rels/pairs->rel
                       rels/transitive-closure)
-        domain (difference (set (map second domain)) (set seed-trace))]
+        domain (set (remove #(= (% 0) "future_read") (map second domain)))
+        domain (difference domain (set seed-trace))]
     (rels/linerize domain strict-hb seed-trace)))
 
 (defn simulate [model chan]
