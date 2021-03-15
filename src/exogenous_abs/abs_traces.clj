@@ -1,85 +1,163 @@
 (ns exogenous-abs.abs-traces
-  (:require [clojure.spec.alpha :as s]
-            [clojure.data.json :as json]
-            [exogenous-abs.abs-trace-spec :refer :all]
-            [exogenous.relations :as rels]))
-
-;;; The wire-protocol for ABS traces is described by the spec in
-;;; exogenous-abs.abs-trace-spec. There is one distinction between the traces
-;;; that travel over the wire, and the ones we work with in the functions in
-;;; this namespace, which is related to a limitation of JSON.
-;;;
-;;; A :abs/json-trace travels over the wire is a collection of maps, with an
-;;; :abs/id and a :abs/local-trace, as described by :abs/trace. When working
-;;; with the traces, it is more practical to let the trace be a map from an
-;;; :abs/id to a :abs/local_trace. E.g. a trace
-;;;
-;;;    [{:abs/id c1 :abs/local_trace t1},
-;;;     {:abs/id c2 :abs/local_trace t2},
-;;;     ...
-;;;     {:abs/id cn :abs/local_trace tn}]
-;;;
-;;;
-;;; is rather represented as a map
-;;;
-;;;    {c1 t1, c2 t2, ..., cn tn}
-;;;
-;;; We will refer to maps like this as traces, even though they don't follow
-;;; the specification of :abs/trace.
-
-(def main-cog [0])
+  (:require [clojure.data.json :as json]
+            [clojure.set :as set]
+            [clojure.spec.alpha :as s]
+            [exogenous-abs.abs-trace-spec :refer :all]))
 
 ;;; Enable spec asserts.
 (s/check-asserts true)
 
-(defn trace->event-keys
-  "Take a trace, and return keys that can be used to retrieve a event in the
-  trace."
-  [trace]
-  (-> (fn [[cog local-trace]]
-        (map-indexed (fn [i e] [cog i]) local-trace))
-      (mapcat trace)))
-
-(defn event-key->event
-  "Take a trace and an event-key and return the event."
-  [trace event-key]
-  (get-in trace event-key))
+(def main-cog
+  "The main-cog of any ABS-trace is identified by the following value."
+  [0])
 
 (def fut-id
   "A future is identified by the caller- and local id."
   (juxt :abs/caller_id :abs/local_id))
 
-(defn group-schedule-events-by-fut
-  "Return a map from a future id to all event keys associated with that future."
-  [trace event-keys]
-  (->> event-keys
-       (filter (comp #(= % :schedule) :abs/type #(event-key->event trace %)))
-       (group-by (comp fut-id (partial event-key->event trace)))))
+(defn synchronization-point? [{:keys [:abs/type]}]
+  (#{:schedule :future_read :cpu :bw :memory} type))
+
+(defn make-atomic-section [node local-trace [beg end]]
+  (let [{:keys [:abs/type :abs/time :abs/name] :as sync-event} (local-trace beg)
+        atomic-section (subvec local-trace beg end)
+        future (fut-id sync-event)
+        by-type (group-by :abs/type atomic-section)
+        resolving-types [:future_write :cpu :bw :memory]
+        resolving-events (mapcat val (select-keys by-type resolving-types))
+        resolves (set (map fut-id resolving-events))
+        creating-types [:invocation :new_object :resource]
+        creating-events (mapcat val (select-keys by-type creating-types))
+        creates (into (if (resolves future) #{} #{future})
+                      (set (map fut-id creating-events)))]
+    ;; What about await_future?
+    {:node node
+     :sync-type type
+     :range [beg end]
+     :name name
+     :time time
+     :future future
+     :resolves resolves
+     :creates creates
+     :enables (set (map fut-id (by-type :await_enable)))
+     :disables (set (map fut-id (by-type :await_disable)))
+     :reads (reduce into #{} (map :abs/reads atomic-section))
+     :writes (reduce into #{} (map :abs/writes atomic-section))}))
+
+;;; TODO: Very refactor
+(defn add-special-cases [sections]
+  (let [has-run (filter (comp (partial = :run) second :future) sections)
+        init-block (first sections)]
+    (if-not (empty? has-run)
+      (do (assert (= :init (:name init-block)))
+          (conj (rest sections) (update init-block :creates conj [(:node init-block) :run])))
+      sections)))
+
+(defn make-local-atomic-sections [[node local-trace]]
+  (let [n (count local-trace)
+        at-sync (fn [i e] (when (synchronization-point? e) i))
+        indices (keep-indexed at-sync local-trace)
+        ranges (map vector indices (concat (rest indices) [n]))
+        sections (map (partial make-atomic-section node local-trace) ranges)]
+    (add-special-cases sections)))
+
+(defn trace->atomic-sections [trace]
+  (into #{} (mapcat make-local-atomic-sections trace)))
+
+(defn atomic-sections-by-node [sections]
+  (let [by-sections (group-by :node sections)]
+    (-> (fn [m n] (update m n (partial sort-by :range)))
+        (reduce by-sections (keys by-sections)))))
+
+(defn init-state [sections]
+  (let [sections-by-node (atomic-sections-by-node sections)
+        main-block (first (sections-by-node main-cog))]
+    {:remaining sections-by-node
+     :created #{}
+     :resolved #{}
+     :disabled #{}
+     :enabled #{main-block}
+     :sequential-trace []}))
+
+(defn update-remaining [state {:keys [node]}]
+  (update-in state [:remaining node] rest))
+
+(defn update-future-status [state {:keys [resolves creates]}]
+  (-> state
+      (update :resolved set/union resolves)
+      (update :created set/union creates)))
+
+(defn update-disabled [state {:keys [enables disables]}]
+  (-> state
+      (update :disabled set/difference enables)
+      (update :disabled set/union disables)))
+
+;;; A section is either a scheduling section or a future read section. For a
+;;; scheduling section, its future must be created. For a future read section,
+;;; its future must be resolved. The section must be its cogs next interaction
+;;; with the future. The section must not be disabled (due to an await on a
+;;; boolean guard). The section must have the minimal time stamp among all
+;;; sections. TODO: Very refactor
+(defn update-enabled [{:keys [remaining created resolved disabled] :as state} section]
+  (let [candidates
+        (for [fut created
+              [cog remaining-trace] remaining
+              :let [wanted-types (if (resolved fut)
+                                   #{:future_read}
+                                   #{:schedule :cpu :bw :memory})
+                    b (filter #(and (= fut (:future %))
+                                    (wanted-types (:sync-type %)))
+                              remaining-trace)]
+              :when (not (empty? b))]
+          (first b))]
+    (assoc state :enabled (set/difference (set candidates) disabled))))
+
+(defn update-sequential-trace [state section]
+  (update state :sequential-trace conj section))
+
+(defn choose-section [{:keys [remaining enabled]}]
+  (->> (set (map (comp first val) remaining))
+       (set/intersection enabled)
+       (apply min-key :time)))
+
+(defn step [state]
+  (let [section (choose-section state)]
+    (-> state
+        (update-remaining section)
+        (update-future-status section)
+        (update-disabled section)
+        (update-enabled section)
+        (update-sequential-trace section))))
+
+(defn linearize-sections [sections]
+  (->> (iterate step (init-state sections))
+       (take (inc (count sections)))))
+
+(defn expand-section [trace {:keys [node range]}]
+  (mapv #(assoc % :node node) (apply subvec (trace node) range)))
+
+(defn expand-sections [trace linearized-sections]
+  (vec (mapcat (partial expand-section trace) linearized-sections)))
+
+(defn sequential-trace->trace [sequential-trace]
+  (-> (fn [t node local-trace]
+        (assoc t node (mapv #(dissoc % :node) local-trace)))
+      (reduce-kv {} (group-by :node sequential-trace))))
 
 ;;; This is really due to a weakness of the traces produced by ABS. We add a
 ;;; caller to the run-method of active objects. The current cog is (seemingly)
 ;;; more easily obtained here than during runtime. This should be refactored if
 ;;; possible.
-(defn add-caller-to-run [trace [cog i]]
-  (let [event (event-key->event trace [cog i])
-        local-id (:abs/local_id event)]
-    (if (= :run local-id)
-      (assoc-in trace (conj [cog i] :abs/caller_id) cog)
-      trace)))
-
-;;; Scheduling events are not necessarily unique, because a method can be
-;;; scheduled multiple times (i.e. suspend and reschedule).
-(defn add-seq-to-local-trace [local-trace]
-  (-> (fn [[t freqs] {:keys [:abs/type] :as event}]
-        (if (= type :schedule)
-          [(conj t (assoc event :abs/seq (or (freqs (fut-id event)) 0)))
-           (update freqs (fut-id event) (fnil inc 0))]
-          [(conj t event) freqs]))
-      (reduce [[] {}] local-trace)
-      first))
-
-(defn add-seq-to-trace [trace]
-  (reduce #(update %1 %2 add-seq-to-local-trace) trace (keys trace)))
+(defn add-caller-to-run [trace]
+  (reduce-kv
+   (fn [trace node local-trace]
+     (reduce (fn [trace i]
+               (let [{:keys [:abs/local_id]} (get-in trace [node i])]
+                 (if (= :run local_id)
+                   (assoc-in trace (conj [node i] :abs/caller_id) node)
+                   trace)))
+             trace (range (count local-trace))))
+   trace trace))
 
 (defn ditch-empty-traces
   "The runtime emits some local traces that can be empty (usually the main-block
@@ -87,114 +165,6 @@
   [trace]
   (-> (fn [t c l] (if (empty? l) t (assoc t c l)))
       (reduce-kv {} trace)))
-
-(defn augment-trace [trace]
-  (->> (trace->event-keys trace)
-       (reduce add-caller-to-run trace)
-       (add-seq-to-trace)
-       (ditch-empty-traces)))
-
-;; (defn get-enabled [trace fut-map fut-status disabled]
-;;   (->> (filter (comp (partial = :unresolved) second) fut-status)
-;;        (map (comp fut-map first))
-;;        (mapcat (partial map (partial event-key->event trace)))
-;;        (group-by fut-id)
-;;        (map (comp (partial apply min-key :abs/seq) second))
-;;        (remove disabled)
-;;        (set)))
-
-;; (defn linearize-step [{:keys [trace cog-ptrs
-;;                               fut-map fut-status
-;;                               disabled enabled
-;;                               sequential-trace]
-;;                        :as current}]
-;;   (let [candidates (filter #(enabled (event-key->event trace %)) cog-ptrs)
-;;         [cog i] (first candidates)
-;;         next-event (event-key->event trace [cog i])
-;;         new-cog-ptrs (if (= i (dec (count (trace cog))))
-;;                        (dissoc cog-ptrs cog)
-;;                        (assoc cog-ptrs cog (inc i)))]
-;;     (-> current
-;;         (assoc :cog-ptrs new-cog-ptrs))))
-
-;; (defn linearize [trace]
-;;   (let [event-keys (trace->event-keys trace)
-;;         cog-ptrs (reduce #(assoc %1 %2 0) {} (keys trace))
-;;         fut-map (group-schedule-events-by-fut trace event-keys)
-;;         fut-status {[:undefined :main] :unresolved}
-;;         disabled #{}
-;;         enabled (get-enabled trace fut-map fut-status disabled)
-;;         sequential-trace []]
-;;     (->> {:trace trace :cog-ptrs cog-ptrs
-;;           :fut-map fut-map :fut-status fut-status
-;;           :enabled enabled :disabled disabled
-;;           :abs/sequential-trace sequential-trace}
-;;          (iterate linearize-step)
-;;          (take (reduce + (map count (vals trace))))
-;;          doall)))
-
-(defn abstract-event [event]
-  (select-keys event [:abs/type :abs/caller_id :abs/local_id :abs/seq]))
-
-(defn add-global-dep [mhb {:keys [:abs/type :abs/name :abs/seq] :as event}]
-  (let [add-to-mhb (partial rels/relate mhb)
-        ev (abstract-event event)]
-    (cond
-      ;; Special case for main-block, which does not depend on anything
-      (or (and (= (:abs/local_id event) :main) (= type :schedule) (zero? seq))
-          (and (= (:abs/local_id event) :run) (= type :schedule) (zero? seq)))
-      mhb
-
-      ;; Special case for the init-block, which depends on object creation
-      (and (= type :schedule) (= name :init))
-      (-> (dissoc ev :abs/seq)
-          (assoc :abs/type :new_object)
-          (add-to-mhb ev))
-
-      ;; First schedule is dependent on an invoc
-      (and (= type :schedule) (zero? seq))
-      (-> (dissoc ev :abs/seq)
-          (assoc :abs/type :invocation)
-          (add-to-mhb ev))
-
-      ;; Other scheduling-events are dependent on the previous
-      (= type :schedule)
-      (add-to-mhb (update ev :abs/seq dec) ev)
-
-      ;; Future reads wait for future writes
-      (= type :future_read)
-      (add-to-mhb (assoc ev :abs/type :future_write) ev)
-
-      ;; Awaiting futures wait for future writes
-      (= type :await_future)
-      (add-to-mhb (assoc ev :abs/type :future_write) ev)
-
-      :else mhb)))
-
-(defn add-seq-dep [mhb [e1 e2]]
-  (if (or (s/valid? :abs/dc-event e1)
-          (s/valid? :abs/dc-event e2)
-          (= (:abs/type e2) :schedule))
-    mhb
-    (rels/relate mhb (abstract-event e1) (abstract-event e2))))
-
-(defn atomic-blocks [local-trace]
-  (partition-by ))
-
-(defn add-local-dep [mhb cog local-trace]
-  (if (and (s/valid? :abs/cog-local-trace local-trace)
-           (not= cog main-cog))
-    (let [init-ends (second local-trace)
-          init-deps (map vector (repeat init-ends) (drop 2 local-trace))
-          blocks (atomic-blocks local-trace)]
-      (->> 
-       (reduce-kv (fn [mhb init ev] (rels/relate mhb init ev)) mhb)))
-    mhb))
-
-(defn gen-mhb [trace]
-  (let [events (mapcat second trace)
-        global-mhb (reduce add-global-dep {} events)]
-    (reduce-kv add-local-dep global-mhb trace)))
 
 (defn json->clj
   "Take a string and return a clojure data structure. Make all keys into
@@ -219,7 +189,10 @@
        (s/assert :abs/json-trace)
        (reduce add-cog {})
        (s/assert :abs/trace)
-       (augment-trace)
+       (ditch-empty-traces)
+       (s/assert :abs/trace)
+       (add-caller-to-run)
        (s/assert :abs/trace)))
 
-(def t (json->trace (slurp "resources/abs-models/shared-buffer-naive/trace.json")))
+(def t1 (json->trace (slurp "resources/abs-models/shared-buffer-naive/trace.json")))
+(def t2 (json->trace (slurp "resources/abs-models/photo-video/trace.json")))
