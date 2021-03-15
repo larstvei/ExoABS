@@ -72,16 +72,82 @@
                               :dc-local-trace :abs/dc-local-trace))
 
 ;;; A trace belongs to either a cog or a DC, identified by a vector of
-;;; integers.
-(s/def :abs/id (s/coll-of int? :kind vector?))
+;;; integers. We refer to a cog or DC as a node, in a context where we do not
+;;; wish to distinguish between them.
+(s/def :abs/node (s/coll-of int? :kind vector?))
 
 ;;; An entry in a JSON collection is a map containing an ID to a cog or DC and
 ;;; a local trace.
-(s/def :abs/json-entry (s/keys :req [:abs/id :abs/local_trace]))
+(s/def :abs/json-entry (s/keys :req [:abs/node :abs/local_trace]))
 
 ;;; A JSON trace is a collection of local traces, owned by an identifiable cog
 ;;; or DC.
 (s/def :abs/json-trace (s/coll-of :abs/json-entry))
 
 ;;; A trace is a mapping from a cog/DC to a local trace.
-(s/def :abs/trace (s/map-of :abs/id :abs/local_trace))
+(s/def :abs/trace (s/map-of :abs/node :abs/local_trace))
+
+;;; When working with traces, we apply an abstraction, capturing all the
+;;; behavior of an /atomic section/ in a single structure. An atomic section is
+;;; a section with no synchronization, i.e. the events between release points
+;;; or future reads.
+
+;;; A node is a cog or DC
+(s/def :atomic/node :abs/node)
+
+;;; Synchronization occurs with the following event types.
+(s/def :atomic/sync-type #{:schedule :future_read :cpu :bw :memory})
+
+;;; The range specifies the begin- and end indices of the section in the local
+;;; trace of the node.
+(s/def :atomic/range (s/tuple nat-int? nat-int?))
+
+;;; We inherit the name of the first event of the section (used for debugging).
+(s/def :atomic/name :abs/name)
+
+;;; Get the time of the synchronization point.
+(s/def :atomic/time :abs/time)
+
+;;; All atomic sections are identified by a future.
+(s/def :atomic/future-id (s/tuple :abs/caller_id :abs/local_id))
+
+;; An atomic section may create multiple futures.
+(s/def :atomic/creates (s/coll-of :atomic/future-id :kind set?))
+
+;; An atomic section can resolve a single future.
+(s/def :atomic/resolves (s/coll-of :atomic/future-id :kind set? :max-count 1))
+
+;; An atomic section can depend on the creation of a single future. The main
+;; block is an exception.
+(s/def :atomic/depends-on-create (s/coll-of :atomic/future-id :kind set? :max-count 1))
+
+;; An atomic section may depend on multiple futures being resolved.
+(s/def :atomic/depends-on-resolve (s/coll-of :atomic/future-id :kind set?))
+
+;;; An atomic section may enable multiple boolean guards.
+(s/def :atomic/enables (s/coll-of :atomic/future-id :kind set?))
+
+;;; An atomic section may disable multiple boolean guards.
+(s/def :atomic/disables (s/coll-of :atomic/future-id :kind set?))
+
+;;; An atomic section inherits the reads from the events of the section.
+(s/def :atomic/reads :abs/reads)
+
+;;; An atomic section inherits the writes from the events of the section.
+(s/def :atomic/writes :abs/writes)
+
+;;; An atomic section is a map with the keys specified above.
+(s/def :atomic/section (s/keys :req [:atomic/node
+                                     :atomic/sync-type
+                                     :atomic/range
+                                     :atomic/name
+                                     :atomic/time
+                                     :atomic/future-id
+                                     :atomic/creates
+                                     :atomic/resolves
+                                     :atomic/depends-on-create
+                                     :atomic/depends-on-resolve
+                                     :atomic/enables
+                                     :atomic/disables
+                                     :atomic/reads
+                                     :atomic/writes]))
