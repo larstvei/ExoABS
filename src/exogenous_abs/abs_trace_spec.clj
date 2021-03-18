@@ -34,8 +34,8 @@
 (s/def :abs/name keyword?)
 
 ;;; Both reads and writes are given as a sequence of keywords.
-(s/def :abs/reads (s/coll-of keyword?))
-(s/def :abs/writes (s/coll-of keyword?))
+(s/def :abs/reads (s/coll-of string?))
+(s/def :abs/writes (s/coll-of string?))
 
 ;;; Time is given as a non-negative number.
 (s/def :abs/time (complement neg?))

@@ -2,7 +2,8 @@
   (:require [clojure.data.json :as json]
             [clojure.set :as set]
             [clojure.spec.alpha :as s]
-            [exogenous-abs.abs-trace-spec :refer :all]))
+            [exogenous-abs.abs-trace-spec :refer :all]
+            [exogenous.relations :as rels]))
 
 ;;; Enable spec asserts.
 (s/check-asserts true)
@@ -32,8 +33,7 @@
         resolves (fut-ids-for-types by-type [:future_write :cpu :bw :memory])
         creates (fut-ids-for-types by-type [:invocation :new_object :resource])
         depends-on-create (if (= type :future_read) #{} #{future})
-        depends-on-resolve (fut-ids-for-types by-type [:future_read :future_write])]
-    ;; What about await_future? will be fixed by introducing depends-on-resolve
+        depends-on-resolve (fut-ids-for-types by-type [:future_read :await_future])]
     {:atomic/node node
      :atomic/sync-type type
      :atomic/range [beg end]
@@ -74,67 +74,61 @@
     (-> (fn [m n] (update m n (partial sort-by :atomic/range)))
         (reduce by-sections (keys by-sections)))))
 
+(defn causal-dependency? [{:keys [:atomic/creates :atomic/resolves]}
+                          {:keys [:atomic/depends-on-create
+                                  :atomic/depends-on-resolve]}]
+  (seq (set/union (set/intersection creates depends-on-create)
+                  (set/intersection resolves depends-on-resolve))))
+
+(defn local-dependency? [{node1 :atomic/node [i _] :atomic/range :as s1}
+                         {node2 :atomic/node [j _] :atomic/range :as s2}]
+  (and (= node1 node2) (< i j)
+       (or (= (fut-id s1) (fut-id s2))
+           (= :init (:atomic/name s1)))))
+
+(defn time-dependency? [{t1 :atomic/time} {t2 :atomic/time}]
+  (< t1 t2))
+
+(defn must-happen-before [sections]
+  (-> (for [s1 sections
+            s2 sections
+            :when (or (causal-dependency? s1 s2)
+                      (local-dependency? s1 s2)
+                      (time-dependency? s1 s2))]
+        [s1 s2])
+      (rels/pairs->rel)))
+
 (defn init-state [sections]
   (let [sections-by-node (atomic-sections-by-node sections)
         main-block (first (sections-by-node main-cog))]
-    {:remaining sections-by-node
-     :created #{(:atomic/future-id main-block)}
-     :resolved #{}
+    {:remaining sections
+     :mhb (must-happen-before sections)
+     :seen #{}
      :disabled #{}
      :enabled #{main-block}
-     :chosen nil}))
-
-(defn update-remaining [state {:keys [:atomic/node]}]
-  (update-in state [:remaining node] rest))
-
-(defn update-future-status [state {:keys [:atomic/resolves :atomic/creates]}]
-  (-> state
-      (update :resolved set/union resolves)
-      (update :created set/union creates)))
+     :selected :none-selected}))
 
 (defn update-disabled [state {:keys [:atomic/enables :atomic/disables]}]
   (-> state
       (update :disabled set/difference enables)
       (update :disabled set/union disables)))
 
-;;; A section is either a scheduling section or a future read section. For a
-;;; scheduling section, its future must be created. For a future read section,
-;;; its future must be resolved. The section must be its cogs next interaction
-;;; with the future. The section must not be disabled (due to an await on a
-;;; boolean guard). The section must have the minimal time stamp among all
-;;; sections. TODO: Very refactor
-(defn update-enabled [{:keys [remaining created resolved disabled] :as state} section]
-  (let [candidates
-        (for [fut created
-              [cog remaining-trace] remaining
-              :let [wanted-types (if (resolved fut)
-                                   #{:future_read}
-                                   #{:schedule :cpu :bw :memory})
-                    b (filter #(and (= fut (:atomic/future-id %))
-                                    (wanted-types (:atomic/sync-type %)))
-                              remaining-trace)]
-              :when (not (empty? b))]
-          (first b))]
-    (assoc state :enabled (set/difference (set candidates) disabled))))
+(defn update-enabled [{:keys [remaining mhb seen disabled] :as state}]
+  (let [is-enabled? (fn [s] (empty? (set/difference (mhb s) seen)))
+        candidates (set (filter is-enabled? remaining))]
+    (assoc state :enabled (set/difference candidates disabled))))
 
-(defn update-chosen [state section]
-  (assoc state :chosen section))
-
-(defn choose-section [{:keys [remaining enabled]}]
-  (->> (set (map (comp first val) remaining))
-       (set/intersection enabled)
-       ;; If it is enabled, then it must be minimal in terms of time.
-       ;; TODO: Very refactor.
-       (apply min-key :atomic/time)))
+(defn choose-section [{:keys [enabled]}]
+  (apply min-key (comp first :atomic/range) enabled))
 
 (defn step [state]
   (let [section (choose-section state)]
     (-> state
-        (update-remaining section)
-        (update-future-status section)
+        (assoc :selected section)
+        (update :seen conj section)
+        (update :remaining disj section)
         (update-disabled section)
-        (update-enabled section)
-        (update-chosen section))))
+        (update-enabled))))
 
 (defn linearize-sections [sections]
   (->> (iterate step (init-state sections))
