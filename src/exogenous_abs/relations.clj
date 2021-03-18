@@ -25,3 +25,14 @@
                       (time-dependency? s1 s2))]
         [s1 s2])
       (rels/pairs->rel)))
+
+(defn interference [sections]
+  (-> (for [{node1 :atomic/node r1 :atomic/reads w1 :atomic/writes :as s1} sections
+            {node2 :atomic/node r2 :atomic/reads w2 :atomic/writes :as s2} sections
+            :when (and (= node1 node2)
+                       (not= s1 s2)
+                       (or (seq (set/intersection r1 w2))
+                           (seq (set/intersection w1 r2))
+                           (seq (set/intersection w1 w2))))]
+        [s1 s2])
+      (rels/pairs->rel)))
