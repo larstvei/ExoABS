@@ -1,149 +1,96 @@
 (ns exogenous-abs.abs-traces
   (:require [clojure.data.json :as json]
-            [clojure.set :as set]
-            [clojure.spec.alpha :as s]
-            [exogenous-abs.abs-trace-spec :refer :all]
-            [exogenous.relations :as rels]))
+            [clojure.spec.alpha :as s]))
 
 ;;; Enable spec asserts.
 (s/check-asserts true)
 
-(def main-cog
-  "The main-cog of any ABS-trace is identified by the following value."
-  [0])
+;;; The trace of a cog can emit events of the following type.
+(s/def :abs/cog-type #{:schedule
+                       :invocation
+                       :new_object
+                       :suspend
+                       :await_future
+                       :future_read
+                       :future_write
+                       :await_disable
+                       :await_enable
+                       :resource})
 
-(def fut-id
-  "A future is identified by the caller- and local id."
-  (juxt :abs/caller_id :abs/local_id))
+;;; The trace of a deployment component can emit events of the following type.
+(s/def :abs/dc-type #{:cpu :bw :memory})
 
-(defn synchronization-point? [{:keys [:abs/type]}]
-  (#{:schedule :future_read :cpu :bw :memory} type))
+;;; The type of an event must fall in either category.
+(s/def :abs/type (s/or :cog-type :abs/cog-type
+                       :dc-type :abs/dc-type))
 
-(defn fut-ids-for-types [by-type types]
-  (->> (select-keys by-type types)
-       (mapcat val)
-       (map fut-id)
-       (into #{})))
+;;; Generally, a caller ID is given as a list of nats. The exception is the
+;;; main and run methods, which are left undefined.
+(s/def :abs/caller_id (s/or :generally (s/coll-of nat-int? :kind vector?)
+                            :main-or-run #{:undefined}))
 
-(defn make-atomic-section [node local-trace [beg end]]
-  (let [{:keys [:abs/type :abs/time :abs/name] :as sync-event} (local-trace beg)
-        atomic-section (subvec local-trace beg end)
-        future (fut-id sync-event)
-        by-type (group-by :abs/type atomic-section)
-        resolves (fut-ids-for-types by-type [:future_write :cpu :bw :memory])
-        creates (fut-ids-for-types by-type [:invocation :new_object :resource])
-        depends-on-create (if (= type :future_read) #{} #{future})
-        depends-on-resolve (fut-ids-for-types by-type [:future_read :await_future])]
-    {:atomic/node node
-     :atomic/sync-type type
-     :atomic/range [beg end]
-     :atomic/name name
-     :atomic/time time
-     :atomic/future-id future
-     :atomic/creates creates
-     :atomic/resolves resolves
-     :atomic/depends-on-create depends-on-create
-     :atomic/depends-on-resolve depends-on-resolve
-     :atomic/enables (fut-ids-for-types by-type [:await_enable])
-     :atomic/disables (fut-ids-for-types by-type [:await_disable])
-     :atomic/reads (reduce into #{} (map :abs/reads atomic-section))
-     :atomic/writes (reduce into #{} (map :abs/writes atomic-section))}))
+;;; Generally, a local ID is given by a nat. The exception is the main and run
+;;; methods, which are identified by name.
+(s/def :abs/local_id (s/or :generally nat-int?
+                           :main-or-run #{:main :run}))
 
-;;; TODO: Very refactor
-(defn add-special-cases [sections]
-  (let [has-run (filter (comp (partial = :run) second :atomic/future-id) sections)
-        init-block (first sections)]
-    (if-not (empty? has-run)
-      (do (assert (= :init (:atomic/name init-block)))
-          (conj (rest sections) (update init-block :atomic/creates conj [(:atomic/node init-block) :run])))
-      sections)))
+;;; A name is simply a keyword.
+(s/def :abs/name keyword?)
 
-(defn make-local-atomic-sections [[node local-trace]]
-  (let [n (count local-trace)
-        at-sync (fn [i e] (when (synchronization-point? e) i))
-        indices (keep-indexed at-sync local-trace)
-        ranges (map vector indices (concat (rest indices) [n]))
-        sections (map (partial make-atomic-section node local-trace) ranges)]
-    (add-special-cases sections)))
+;;; Both reads and writes are given as a sequence of keywords.
+(s/def :abs/reads (s/coll-of string?))
+(s/def :abs/writes (s/coll-of string?))
 
-(defn trace->atomic-sections [trace]
-  (into #{} (mapcat make-local-atomic-sections trace)))
+;;; Time is given as a non-negative number.
+(s/def :abs/time (complement neg?))
 
-(defn atomic-sections-by-node [sections]
-  (let [by-sections (group-by :atomic/node sections)]
-    (-> (fn [m n] (update m n (partial sort-by :atomic/range)))
-        (reduce by-sections (keys by-sections)))))
+;;; The amount (which refers to the resources provided by a deployment
+;;; component) is given as a non-negative number.
+(s/def :abs/amount (complement neg?))
 
-(defn causal-dependency? [{:keys [:atomic/creates :atomic/resolves]}
-                          {:keys [:atomic/depends-on-create
-                                  :atomic/depends-on-resolve]}]
-  (seq (set/union (set/intersection creates depends-on-create)
-                  (set/intersection resolves depends-on-resolve))))
+;;; The event on a cog requires the following fields, with values determined by
+;;; their respective specs.
+(s/def :abs/cog-event (s/keys :req [:abs/type
+                                    :abs/caller_id
+                                    :abs/local_id
+                                    :abs/name
+                                    :abs/reads
+                                    :abs/writes
+                                    :abs/time]))
 
-(defn local-dependency? [{node1 :atomic/node [i _] :atomic/range :as s1}
-                         {node2 :atomic/node [j _] :atomic/range :as s2}]
-  (and (= node1 node2) (< i j)
-       (or (= (fut-id s1) (fut-id s2))
-           (= :init (:atomic/name s1)))))
+;;; The event on a DC requires the following fields, with values determined by
+;;; their respective specs.
+(s/def :abs/dc-event (s/keys :req [:abs/type
+                                   :abs/caller_id
+                                   :abs/local_id
+                                   :abs/amount
+                                   :abs/time]))
 
-(defn time-dependency? [{t1 :atomic/time} {t2 :atomic/time}]
-  (< t1 t2))
+;;; A cog-local trace is a vector of cog-events.
+(s/def :abs/cog-local-trace (s/coll-of :abs/cog-event :kind vector?))
+;;; A dc-local trace is a vector of dc-events.
+(s/def :abs/dc-local-trace (s/coll-of :abs/dc-event :kind vector?))
 
-(defn must-happen-before [sections]
-  (-> (for [s1 sections
-            s2 sections
-            :when (or (causal-dependency? s1 s2)
-                      (local-dependency? s1 s2)
-                      (time-dependency? s1 s2))]
-        [s1 s2])
-      (rels/pairs->rel)))
+;;; A local trace is either a cog-local trace or a dc-local trace.
+(s/def :abs/local_trace (s/or :cog-local-trace :abs/cog-local-trace
+                              :dc-local-trace :abs/dc-local-trace))
 
-(defn init-state [sections]
-  (let [sections-by-node (atomic-sections-by-node sections)
-        main-block (first (sections-by-node main-cog))]
-    {:remaining sections
-     :mhb (must-happen-before sections)
-     :seen #{}
-     :disabled #{}
-     :enabled #{main-block}
-     :selected :none-selected}))
+;;; A trace belongs to either a cog or a DC, identified by a vector of
+;;; integers. We refer to a cog or DC as a node, in a context where we do not
+;;; wish to distinguish between them.
+(s/def :abs/node (s/coll-of int? :kind vector?))
 
-(defn update-disabled [state {:keys [:atomic/enables :atomic/disables]}]
-  (-> state
-      (update :disabled set/difference enables)
-      (update :disabled set/union disables)))
+;;; An entry in a JSON collection is a map containing an ID to a cog or DC and
+;;; a local trace.
+(s/def :abs/json-entry (s/keys :req [:abs/node :abs/local_trace]))
 
-(defn update-enabled [{:keys [remaining mhb seen disabled] :as state}]
-  (let [is-enabled? (fn [s] (empty? (set/difference (mhb s) seen)))
-        candidates (set (filter is-enabled? remaining))]
-    (assoc state :enabled (set/difference candidates disabled))))
+;;; A JSON trace is a collection of local traces, owned by an identifiable cog
+;;; or DC.
+(s/def :abs/json-trace (s/coll-of :abs/json-entry))
 
-(defn choose-section [{:keys [enabled]}]
-  (apply min-key (comp first :atomic/range) enabled))
+;;; A trace is a mapping from a cog/DC to a local trace.
+(s/def :abs/trace (s/map-of :abs/node :abs/local_trace))
 
-(defn step [state]
-  (let [section (choose-section state)]
-    (-> state
-        (assoc :selected section)
-        (update :seen conj section)
-        (update :remaining disj section)
-        (update-disabled section)
-        (update-enabled))))
-
-(defn linearize-sections [sections]
-  (->> (iterate step (init-state sections))
-       (take (inc (count sections)))))
-
-(defn expand-section [trace {:keys [:atomic/node :atomic/range]}]
-  (mapv #(assoc % :atomic/node node) (apply subvec (trace node) range)))
-
-(defn expand-sections [trace linearized-sections]
-  (vec (mapcat (partial expand-section trace) linearized-sections)))
-
-(defn sequential-trace->trace [sequential-trace]
-  (-> (fn [t node local-trace]
-        (assoc t node (mapv #(dissoc % :atomic/node) local-trace)))
-      (reduce-kv {} (group-by :atomic/node sequential-trace))))
 
 ;;; This is really due to a weakness of the traces produced by ABS. We add a
 ;;; caller to the run-method of active objects. The current cog is (seemingly)
@@ -194,6 +141,3 @@
        (s/assert :abs/trace)
        (add-caller-to-run)
        (s/assert :abs/trace)))
-
-(def t1 (json->trace (slurp "resources/abs-models/shared-buffer-naive/trace.json")))
-(def t2 (json->trace (slurp "resources/abs-models/photo-video/trace.json")))

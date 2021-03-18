@@ -34,6 +34,7 @@
 
 (defn run-exploration [model options]
   (let [chan (async/chan)]
+    ;; I'm not sure this loop terminates.
     (async/go-loop []
       (when-let [output (async/<! chan)]
         (println "-------------------------------------------------------")
@@ -98,6 +99,8 @@
           (exit 1 "")))))
 
 (comment
+  (run-exploration "/Users/larstvei/Dropbox/ifi/phd/abs/dpor-tests/gen/erl/run" {})
   (run-exploration "/Users/larstvei/Dropbox/ifi/phd/abs/trace-tests/gen/erl/run" {})
   (run-exploration "/Users/larstvei/Dropbox/ifi/phd/abs/shared-buffer/naive/gen/erl/run" {})
-  (run-exploration "/Users/larstvei/Dropbox/ifi/phd/abs/martimj-master/thesis/models/gen/erl/run" {}))
+  (run-exploration "/Users/larstvei/Dropbox/ifi/phd/abs/martimj-master/thesis/models/gen/erl/run" {})
+  (run-exploration "/Users/larstvei/Dropbox/ifi/phd/papers/jlamp-exogenous/implementation/gen/erl/run" {}))
