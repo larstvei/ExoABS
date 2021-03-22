@@ -50,6 +50,8 @@
 ;;; An atomic section inherits the writes from the events of the section.
 (s/def :atomic/writes :abs/writes)
 
+(s/def :atomic/uniq-id (s/tuple :atomic/node :atomic/future-id nat-int?))
+
 ;;; An atomic section is a map with the keys specified above.
 (s/def :atomic/section (s/keys :req [:atomic/node
                                      :atomic/sync-type
@@ -57,6 +59,7 @@
                                      :atomic/name
                                      :atomic/time
                                      :atomic/future-id
+                                     :atomic/uniq-id
                                      :atomic/creates
                                      :atomic/resolves
                                      :atomic/depends-on-create
@@ -79,10 +82,17 @@
        (map fut-id)
        (into #{})))
 
+(defn occurences-of [type future history]
+  (count (for [ev history
+               :when (and (= (:abs/type ev) type)
+                          (= (fut-id ev) future))]
+           ev)))
+
 (defn make-atomic-section [node local-trace [beg end]]
   (let [{:keys [:abs/type :abs/time :abs/name] :as sync-event} (local-trace beg)
         atomic-section (subvec local-trace beg end)
         future (fut-id sync-event)
+        occurences (occurences-of type future (subvec local-trace 0 beg))
         by-type (group-by :abs/type atomic-section)
         resolves (fut-ids-for-types by-type [:future_write :cpu :bw :memory])
         creates (fut-ids-for-types by-type [:invocation :new_object :resource])
@@ -94,6 +104,7 @@
      :atomic/name name
      :atomic/time time
      :atomic/future-id future
+     :atomic/uniq-id [node future occurences]
      :atomic/creates creates
      :atomic/resolves resolves
      :atomic/depends-on-create depends-on-create
