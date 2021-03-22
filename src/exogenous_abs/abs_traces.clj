@@ -102,10 +102,17 @@
      (reduce (fn [trace i]
                (let [{:keys [:abs/local_id]} (get-in trace [node i])]
                  (if (= :run local_id)
-                   (assoc-in trace (conj [node i] :abs/caller_id) node)
+                   (assoc-in trace [node i :abs/caller_id] node)
                    trace)))
              trace (range (count local-trace))))
    trace trace))
+
+(defn remove-caller-from-run [local-trace]
+  (-> (fn [{:keys [:abs/local_id] :as event}]
+        (if (= local_id :run)
+          (assoc event :abs/caller_id :undefined)
+          event))
+      (mapv local-trace)))
 
 (defn ditch-empty-traces
   "The runtime emits some local traces that can be empty (usually the main-block
@@ -141,3 +148,10 @@
        (s/assert :abs/trace)
        (add-caller-to-run)
        (s/assert :abs/trace)))
+
+(defn trace->json [trace]
+  (-> (fn [json-trace node local-trace]
+        (let [new-local (remove-caller-from-run local-trace)]
+          (conj json-trace {:abs/node node :abs/local_trace new-local})))
+      (reduce-kv [] trace)
+      (json/write-str)))
