@@ -10,6 +10,9 @@
 (def t1 (abs-traces/json->trace json-trace1))
 (def t2 (abs-traces/json->trace json-trace2))
 
+(def as1 (atomic/trace->atomic-sections t1))
+(def as2 (atomic/trace->atomic-sections t2))
+
 (deftest conversion
   ;; Node that we don't test if we produce the same JSON. Rather we test if
   ;; converting the trace to JSON, and convert back again to a trace, then we
@@ -17,9 +20,15 @@
   (is (= t1 (abs-traces/json->trace (abs-traces/trace->json t1))))
   (is (= t2 (abs-traces/json->trace (abs-traces/trace->json t2)))))
 
+(deftest uniqe-ids
+  (is (= (count as1)
+         (count (set (map :atomic/uniq-id as1)))))
+  (is (= (count as2)
+         (count (set (map :atomic/uniq-id as2))))))
+
 (defn trace->seq->trace-is-id [trace]
   (let [sections (atomic/trace->atomic-sections trace)
-        steps (linearize/linearize-sections sections)
+        steps (linearize/linearize-sections [] sections)
         sequential-sections (mapv :selected (rest steps))
         sequential-trace (linearize/expand-sections trace sequential-sections)]
     (is (= trace (linearize/linearization->abs-trace sequential-trace)))))
@@ -27,4 +36,3 @@
 (deftest linearization
   (trace->seq->trace-is-id t1)
   (trace->seq->trace-is-id t2))
-

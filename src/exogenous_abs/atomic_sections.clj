@@ -1,5 +1,6 @@
 (ns exogenous-abs.atomic-sections
-  (:require [clojure.spec.alpha :as s]))
+  (:require [exogenous-abs.abs-traces]
+            [clojure.spec.alpha :as s]))
 
 ;;; When working with traces, we apply an abstraction, capturing all the
 ;;; behavior of an /atomic section/ in a single structure. An atomic section is
@@ -50,7 +51,7 @@
 ;;; An atomic section inherits the writes from the events of the section.
 (s/def :atomic/writes :abs/writes)
 
-(s/def :atomic/uniq-id (s/tuple :atomic/node :atomic/future-id nat-int?))
+(s/def :atomic/uniq-id (s/tuple :atomic/node :atomic/sync-type :atomic/future-id nat-int?))
 
 ;;; An atomic section is a map with the keys specified above.
 (s/def :atomic/section (s/keys :req [:atomic/node
@@ -68,6 +69,9 @@
                                      :atomic/disables
                                      :atomic/reads
                                      :atomic/writes]))
+
+;;; From the atomic sections, we can derive a simplified exo-trace.
+(s/def exo-trace (s/coll-of :atomic/uniq-id :kind vector? :distinct true))
 
 (def fut-id
   "A future is identified by the caller- and local id."
@@ -104,15 +108,15 @@
      :atomic/name name
      :atomic/time time
      :atomic/future-id future
-     :atomic/uniq-id [node future occurences]
+     :atomic/uniq-id [node type future occurences]
      :atomic/creates creates
      :atomic/resolves resolves
      :atomic/depends-on-create depends-on-create
      :atomic/depends-on-resolve depends-on-resolve
-     :atomic/enables (fut-ids-for-types by-type [:await_enable])
-     :atomic/disables (fut-ids-for-types by-type [:await_disable])
-     :atomic/reads (reduce into #{} (map :abs/reads atomic-section))
-     :atomic/writes (reduce into #{} (map :abs/writes atomic-section))}))
+     :atomic/enables (set (by-type :await_enable))
+     :atomic/disables (set (by-type :await_disable))
+     :atomic/reads (->> atomic-section last :abs/reads (into #{}))
+     :atomic/writes (->> atomic-section last :abs/writes (into #{}))}))
 
 ;;; TODO: Very refactor
 (defn add-special-cases [sections]
