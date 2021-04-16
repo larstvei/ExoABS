@@ -51,7 +51,6 @@
     (set/union sections phantom-sections)))
 
 (defn init-state [seed-trace sections]
-  ;; Make phantom-section for each future that is never resolved?
   (let [sections (add-phantom-sections sections)
         sections-by-node (atomic-sections-by-node sections)
         main-block (first (sections-by-node main-cog))]

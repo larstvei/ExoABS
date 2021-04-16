@@ -60,8 +60,9 @@
   (let [{:keys [model options exit-message ok?]} (validate-args args)]
     (if exit-message
       (exit (if ok? 0 1) exit-message)
-      (do (run-exploration model options)
-          (exit 1 "")))))
+      (do
+        (clojure.pprint/pprint (run-exploration model options))
+        (exit 1 "")))))
 
 (comment
   (run-exploration "/Users/larstvei/Dropbox/ifi/phd/abs/dpor-tests/gen/erl/run" {})
