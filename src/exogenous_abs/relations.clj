@@ -14,7 +14,9 @@
           (:atomic/node s2))
        (< (first (:atomic/range s1))
           (first (:atomic/range s2)))
-       (or (= (:atomic/future-id s1)
+       (or (and (not= :schedule (:atomic/sync-type s1))
+                (not= :schedule (:atomic/sync-type s2)))
+           (= (:atomic/future-id s1)
               (:atomic/future-id s2))
            (= :init (:atomic/name s1)))))
 
@@ -37,18 +39,18 @@
       (rels/rel-union mhb)))
 
 (defn interference [read-writes]
-  (-> (for [[node1 type1 fut1 seq1 :as u1] (keys read-writes)
-            [node2 type2 fut2 seq2 :as u2] (keys read-writes)
-            :let [{r1 :reads w1 :writes} (read-writes u1)
-                  {r2 :reads w2 :writes} (read-writes u2)]
-            :when (and (= type1 :schedule)
-                       (= type2 :schedule)
-                       (= node1 node2)
-                       (not= u1 u2)
-                       (or (seq (set/intersection r1 w2))
-                           (seq (set/intersection w1 r2))
-                           (seq (set/intersection w1 w2))))]
-        [u1 u2])))
+  (set (for [[node1 type1 fut1 seq1 :as u1] (keys read-writes)
+             [node2 type2 fut2 seq2 :as u2] (keys read-writes)
+             :let [{r1 :reads w1 :writes} (read-writes u1)
+                   {r2 :reads w2 :writes} (read-writes u2)]
+             :when (and (= type1 :schedule)
+                        (= type2 :schedule)
+                        (= node1 node2)
+                        (not= u1 u2)
+                        (or (seq (set/intersection r1 w2))
+                            (seq (set/intersection w1 r2))
+                            (seq (set/intersection w1 w2))))]
+         [u1 u2])))
 
 #_(defn interference [sections]
     (-> (for [{r1 :atomic/reads w1 :atomic/writes :as s1} sections
