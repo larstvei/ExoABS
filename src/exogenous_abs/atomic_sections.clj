@@ -129,13 +129,30 @@
                (conj (rest sections))))
       sections)))
 
+(defn merge-future-reads-rw-sets [local-sections]
+  (let [is-future-read (fn [i {:keys [:atomic/sync-type]}] (when (= sync-type :future_read) i))
+        future-reads-indices (keep-indexed is-future-read local-sections)]
+    (-> (fn [sections i]
+          (let [reads (merge (get-in sections [(dec i) :atomic/reads])
+                             (get-in sections [i :atomic/reads]))
+                writes (merge (get-in sections [(dec i) :atomic/writes])
+                              (get-in sections [i :atomic/writes]))]
+            (-> sections
+                (assoc-in [(dec i) :atomic/reads] reads)
+                (assoc-in [i :atomic/reads] reads)
+                (assoc-in [(dec i) :atomic/writes] writes)
+                (assoc-in [i :atomic/writes] writes))))
+        (reduce local-sections future-reads-indices))))
+
 (defn make-local-atomic-sections [[node local-trace]]
   (let [n (count local-trace)
         at-sync (fn [i e] (when (synchronization-point? e) i))
         indices (keep-indexed at-sync local-trace)
         ranges (map vector indices (concat (rest indices) [n]))
-        sections (map (partial make-atomic-section node local-trace) ranges)]
-    (add-special-cases sections)))
+        sections (mapv (partial make-atomic-section node local-trace) ranges)]
+    (-> sections
+        merge-future-reads-rw-sets
+        add-special-cases)))
 
 (defn trace->atomic-sections [trace]
   (into #{} (mapcat make-local-atomic-sections trace)))
