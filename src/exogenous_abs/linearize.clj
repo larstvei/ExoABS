@@ -81,8 +81,8 @@
 
 (defn pick-first [enabled]
   (let [truly-enabled (remove :atomic/phantom enabled)]
-   (when-not (empty? enabled)
-     (apply min-key (comp first :atomic/range) enabled))))
+    (when-not (empty? enabled)
+      (apply min-key (comp first :atomic/range) enabled))))
 
 (defn update-disabled [{:keys [schedule-counters disabled-futures] :as state}
                        {:keys [:atomic/node] :as section}]
