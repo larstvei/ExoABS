@@ -32,7 +32,7 @@
    :atomic/name name
    :atomic/time nil
    :atomic/future-id future-id
-   :atomic/uniq-id (update uniq-id 3 inc)
+   :atomic/uniq-id (update uniq-id 4 inc)
    :atomic/creates #{}
    :atomic/resolves #{}
    :atomic/depends-on-create #{}
@@ -102,7 +102,7 @@
         new-read-writes (-> (fn [rw event]
                               (let [fut (atomic/fut-id event)
                                     s (schedule-counters fut)
-                                    uniq [node :schedule fut s]]
+                                    uniq [node :schedule fut :phantom s]]
                                 (update-in rw [uniq :reads]
                                            (fnil set/union #{})
                                            (set (:abs/reads event)))))
@@ -144,7 +144,7 @@
         (assoc t node (mapv #(dissoc % :atomic/node) local-trace)))
       (reduce-kv {} (group-by :atomic/node linearization))))
 
-(defn uniq-id->event [[node sync-type [caller_id local_id] _]]
+(defn uniq-id->event [[node sync-type [caller_id local_id] name _]]
   {:abs/type sync-type
    :abs/caller_id caller_id
    :abs/local_id local_id})
