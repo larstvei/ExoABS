@@ -60,6 +60,7 @@
      :schedule-counters {}
      :disabled-futures #{}
      :disabled #{}
+     :blocked-nodes #{}
      :enabled #{main-block}
      :selected :none-selected
      :read-writes {}
@@ -79,10 +80,21 @@
   (->> (set (filter (partial is-enabled? state) remaining))
        (assoc state :enabled)))
 
+(defn next-section [candidates]
+  (when-not (empty? candidates)
+    (apply min-key (comp first :atomic/range) candidates)))
+
 (defn pick-first [enabled]
   (let [truly-enabled (remove :atomic/phantom enabled)]
-    (when-not (empty? enabled)
-      (apply min-key (comp first :atomic/range) enabled))))
+    (next-section truly-enabled)))
+
+(defn update-blocked-nodes [{:keys [remaining] :as state}]
+  (let [remaining-by-node (group-by :atomic/node remaining)
+        blocked (for [[node sections] remaining-by-node
+                      :let [s (next-section sections)]
+                      :when (= :future_read (:atomic/sync-type s))]
+                  node)]
+    (assoc state :blocked-nodes (set blocked))))
 
 (defn update-disabled [{:keys [schedule-counters disabled-futures] :as state}
                        {:keys [:atomic/node] :as section}]
@@ -125,6 +137,7 @@
         (update :seen conj (:atomic/uniq-id section))
         (update :remaining disj section)
         (update-read-writes section)
+        (update-blocked-nodes)
         (update-disabled-futures section)
         (update-disabled section)
         (update-enabled))))
