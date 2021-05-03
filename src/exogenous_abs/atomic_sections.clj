@@ -51,7 +51,7 @@
 ;;; An atomic section inherits the writes from the events of the section.
 (s/def :atomic/writes :abs/writes)
 
-(s/def :atomic/uniq-id (s/tuple :atomic/node :atomic/sync-type :atomic/future-id :atomic/name nat-int?))
+(s/def :atomic/uniq-id (s/tuple :atomic/node :atomic/sync-type :atomic/future-id nat-int?))
 
 ;;; An atomic section is a map with the keys specified above.
 (s/def :atomic/section (s/keys :req [:atomic/node
@@ -108,7 +108,7 @@
      :atomic/name name
      :atomic/time time
      :atomic/future-id future
-     :atomic/uniq-id [node type future name occurences]
+     :atomic/uniq-id [node type future occurences]
      :atomic/creates creates
      :atomic/resolves resolves
      :atomic/depends-on-create depends-on-create
