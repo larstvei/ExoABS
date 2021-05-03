@@ -133,10 +133,10 @@
   (let [is-future-read (fn [i {:keys [:atomic/sync-type]}] (when (= sync-type :future_read) i))
         future-reads-indices (keep-indexed is-future-read local-sections)]
     (-> (fn [sections i]
-          (let [reads (merge (get-in sections [(dec i) :atomic/reads])
-                             (get-in sections [i :atomic/reads]))
-                writes (merge (get-in sections [(dec i) :atomic/writes])
-                              (get-in sections [i :atomic/writes]))]
+          (let [reads (into (get-in sections [(dec i) :atomic/reads])
+                            (get-in sections [i :atomic/reads]))
+                writes (into (get-in sections [(dec i) :atomic/writes])
+                             (get-in sections [i :atomic/writes]))]
             (-> sections
                 (assoc-in [(dec i) :atomic/reads] reads)
                 (assoc-in [i :atomic/reads] reads)
