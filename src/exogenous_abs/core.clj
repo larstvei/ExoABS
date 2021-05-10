@@ -14,17 +14,17 @@
   (exo/informed-explore (model/simulate model) options))
 
 (def cli-options
-  [["-w" "--workers" "Number of worker threads"
+  [["-w" "--workers WORKERS" "Number of worker threads"
     :default (* 2 (.availableProcessors
                    (Runtime/getRuntime)))
     :parse-fn #(Integer/parseInt %)
     :validate [#(< 0 % 20000) "Must be a number between 0 and 20000"]]
 
-   ["-b" "--backtracking" "The backtracking set used"
+   ["-b" "--backtracking SET" "The backtracking set used"
     :default :backsets
     :parse-fn keyword
     :validate [#{:backsets :sleep-only :naive}
-               "Must be 'breadth-first', 'depth-first' or 'random'"]]
+               "Must be 'backsets', 'sleep-only' or 'naive'"]]
 
    ["-h" "--help"]])
 
