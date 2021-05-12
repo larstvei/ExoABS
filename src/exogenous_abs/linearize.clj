@@ -58,7 +58,6 @@
      :mhb (relations/must-happen-before sections)
      :seen #{}
      :schedule-counters {}
-     :disabled-futures #{}
      :disabled #{}
      :blocked-nodes #{}
      :enabled #{main-block}
@@ -66,15 +65,22 @@
      :read-writes {}
      :seed-trace seed-trace}))
 
-(defn update-disabled-futures [state {:keys [:atomic/enables :atomic/disables]}]
-  (-> state
-      (update :disabled-futures set/difference (set (map atomic/fut-id enables)))
-      (update :disabled-futures set/union (set (map atomic/fut-id disables)))))
+(defn update-disabled [{:keys [schedule-counters disabled] :as state}
+                       {:keys [:atomic/node :atomic/enables :atomic/disables]}]
+  (let [efuts (set (map atomic/fut-id enables))
+        removed (set (filter (fn [[_ _ fut _]] (efuts fut)) disabled))
+        added (set (for [ev disables
+                         :let [fut (atomic/fut-id ev)
+                               i (schedule-counters fut)]]
+                     [node :schedule fut i]))]
+    (-> state
+        (update :disabled set/difference removed)
+        (update :disabled set/union added))))
 
-(defn is-enabled? [{:keys [mhb seen disabled-futures]}
+(defn is-enabled? [{:keys [mhb seen disabled]}
                    {:keys [:atomic/uniq-id :atomic/future-id]}]
   (and (empty? (set/difference (mhb uniq-id) seen))
-       (not (disabled-futures future-id))))
+       (not (disabled uniq-id))))
 
 (defn update-enabled [{:keys [remaining] :as state}]
   (->> (set (filter (partial is-enabled? state) remaining))
@@ -96,12 +102,6 @@
                   node)]
     (assoc state :blocked-nodes (set blocked))))
 
-(defn update-disabled [{:keys [schedule-counters disabled-futures] :as state}
-                       {:keys [:atomic/node] :as section}]
-  (->> (set (for [fut disabled-futures]
-              [node :schedule fut (schedule-counters fut)]))
-       (assoc state :disabled)))
-
 ;;; TODO: Should refactor
 (defn update-read-writes [{:keys [read-writes schedule-counters] :as state}
                           {:keys [:atomic/node
@@ -110,7 +110,7 @@
                                   :atomic/writes
                                   :atomic/enables
                                   :atomic/disables]}]
-  (let [await-events (into enables disables)
+  (let [events (into enables disables)
         new-read-writes (-> (fn [rw event]
                               (let [fut (atomic/fut-id event)
                                     s (schedule-counters fut)
@@ -118,7 +118,7 @@
                                 (update-in rw [uniq :reads]
                                            (fnil set/union #{})
                                            (set (:abs/reads event)))))
-                            (reduce read-writes await-events))]
+                            (reduce read-writes events))]
     (-> (assoc state :read-writes new-read-writes)
         (update-in [:read-writes uniq-id :reads] (fnil set/union #{}) reads)
         (update-in [:read-writes uniq-id :writes] (fnil set/union #{}) writes))))
@@ -138,7 +138,6 @@
         (update :remaining disj section)
         (update-read-writes section)
         (update-blocked-nodes)
-        (update-disabled-futures section)
         (update-disabled section)
         (update-enabled))))
 
