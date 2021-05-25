@@ -24,7 +24,7 @@
 (s/def :atomic/time :abs/time)
 
 ;;; All atomic sections are identified by a future.
-(s/def :atomic/future-id (s/tuple :abs/caller_id :abs/local_id))
+(s/def :atomic/future-id :abs/stable_id)
 
 ;; An atomic section may create multiple futures.
 (s/def :atomic/creates (s/coll-of :atomic/future-id :kind set?))
@@ -73,42 +73,38 @@
 ;;; From the atomic sections, we can derive a simplified exo-trace.
 (s/def exo-trace (s/coll-of :atomic/uniq-id :kind vector? :distinct true))
 
-(def fut-id
-  "A future is identified by the caller- and local id."
-  (juxt :abs/caller_id :abs/local_id))
-
 (defn synchronization-point? [{:keys [:abs/type]}]
   (#{:schedule :future_read :cpu :bw :memory} type))
 
 (defn fut-ids-for-types [by-type types]
   (->> (select-keys by-type types)
        (mapcat val)
-       (map fut-id)
+       (map :abs/stable_id)
        (into #{})))
 
 (defn occurences-of [type future history]
   (count (for [ev history
                :when (and (= (:abs/type ev) type)
-                          (= (fut-id ev) future))]
+                          (= (:abs/stable_id ev) future))]
            ev)))
 
 (defn make-atomic-section [node local-trace [beg end]]
-  (let [{:keys [:abs/type :abs/time :abs/name] :as sync-event} (local-trace beg)
+  (let [{:keys [:abs/type :abs/time :abs/name :abs/stable_id] :as sync-event} (local-trace beg)
         atomic-section (subvec local-trace beg end)
-        future (fut-id sync-event)
-        occurences (occurences-of type future (subvec local-trace 0 beg))
+        future-id stable_id
+        occurences (occurences-of type future-id (subvec local-trace 0 beg))
         by-type (group-by :abs/type atomic-section)
         resolves (fut-ids-for-types by-type [:future_write :cpu :bw :memory])
         creates (fut-ids-for-types by-type [:invocation :new_object :resource])
-        depends-on-create (if (= type :future_read) #{} #{future})
+        depends-on-create (if (= type :future_read) #{} #{future-id})
         depends-on-resolve (fut-ids-for-types by-type [:future_read :await_future])]
     {:atomic/node node
      :atomic/sync-type type
      :atomic/range [beg end]
      :atomic/name name
      :atomic/time time
-     :atomic/future-id future
-     :atomic/uniq-id [node type future occurences]
+     :atomic/future-id future-id
+     :atomic/uniq-id [node type future-id occurences]
      :atomic/creates creates
      :atomic/resolves resolves
      :atomic/depends-on-create depends-on-create
@@ -120,7 +116,7 @@
 
 ;;; TODO: Very refactor
 (defn add-special-cases [sections]
-  (let [has-run (filter (comp (partial = :run) second :atomic/future-id) sections)
+  (let [has-run (filter #(= :run (:atomic/name %)) sections)
         init-block (first sections)]
     (if-not (empty? has-run)
       (do (assert (= :init (:atomic/name init-block)))
@@ -150,9 +146,7 @@
         indices (keep-indexed at-sync local-trace)
         ranges (map vector indices (concat (rest indices) [n]))
         sections (mapv (partial make-atomic-section node local-trace) ranges)]
-    (-> sections
-        merge-future-reads-rw-sets
-        add-special-cases)))
+    (merge-future-reads-rw-sets sections)))
 
 (defn trace->atomic-sections [trace]
   (into #{} (mapcat make-local-atomic-sections trace)))

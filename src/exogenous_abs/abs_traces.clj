@@ -24,15 +24,8 @@
 (s/def :abs/type (s/or :cog-type :abs/cog-type
                        :dc-type :abs/dc-type))
 
-;;; Generally, a caller ID is given as a list of nats. The exception is the
-;;; main and run methods, which are left undefined.
-(s/def :abs/caller_id (s/or :generally (s/coll-of nat-int? :kind vector?)
-                            :main-or-run #{:undefined}))
-
-;;; Generally, a local ID is given by a nat. The exception is the main and run
-;;; methods, which are identified by name.
-(s/def :abs/local_id (s/or :generally nat-int?
-                           :main-or-run #{:main :run}))
+;;; A stable ID is given as a list of nats.
+(s/def :abs/stable_id (s/coll-of nat-int? :kind vector?))
 
 ;;; A name is simply a keyword.
 (s/def :abs/name keyword?)
@@ -51,8 +44,7 @@
 ;;; The event on a cog requires the following fields, with values determined by
 ;;; their respective specs.
 (s/def :abs/cog-event (s/keys :req [:abs/type
-                                    :abs/caller_id
-                                    :abs/local_id
+                                    :abs/stable_id
                                     :abs/name
                                     :abs/reads
                                     :abs/writes
@@ -61,8 +53,7 @@
 ;;; The event on a DC requires the following fields, with values determined by
 ;;; their respective specs.
 (s/def :abs/dc-event (s/keys :req [:abs/type
-                                   :abs/caller_id
-                                   :abs/local_id
+                                   :abs/stable_id
                                    :abs/amount
                                    :abs/time]))
 
@@ -91,36 +82,6 @@
 ;;; A trace is a mapping from a cog/DC to a local trace.
 (s/def :abs/trace (s/map-of :abs/node :abs/local_trace))
 
-
-;;; This is really due to a weakness of the traces produced by ABS. We add a
-;;; caller to the run-method of active objects. The current cog is (seemingly)
-;;; more easily obtained here than during runtime. This should be refactored if
-;;; possible.
-(defn add-caller-to-run [trace]
-  (reduce-kv
-   (fn [trace node local-trace]
-     (reduce (fn [trace i]
-               (let [{:keys [:abs/local_id]} (get-in trace [node i])]
-                 (if (= :run local_id)
-                   (assoc-in trace [node i :abs/caller_id] node)
-                   trace)))
-             trace (range (count local-trace))))
-   trace trace))
-
-(defn remove-caller-from-run [local-trace]
-  (-> (fn [{:keys [:abs/local_id] :as event}]
-        (if (= local_id :run)
-          (assoc event :abs/caller_id :undefined)
-          event))
-      (mapv local-trace)))
-
-(defn ditch-empty-traces
-  "The runtime emits some local traces that can be empty (usually the main-block
-  has a dummy-DC it never interacts with). We can safely remove those."
-  [trace]
-  (-> (fn [t c l] (if (empty? l) t (assoc t c l)))
-      (reduce-kv {} trace)))
-
 (defn json->clj
   "Take a string and return a clojure data structure. Make all keys into
   namespaced keywords (e.g. :abs/local_trace) and all string values
@@ -143,15 +104,10 @@
   (->> (json->clj json)
        (s/assert :abs/json-trace)
        (reduce add-cog {})
-       (s/assert :abs/trace)
-       (ditch-empty-traces)
-       (s/assert :abs/trace)
-       (add-caller-to-run)
        (s/assert :abs/trace)))
 
 (defn trace->json [trace]
   (-> (fn [json-trace node local-trace]
-        (let [new-local (remove-caller-from-run local-trace)]
-          (conj json-trace {:abs/node node :abs/local_trace new-local})))
+        (conj json-trace {:abs/node node :abs/local_trace local-trace}))
       (reduce-kv [] trace)
       (json/write-str)))

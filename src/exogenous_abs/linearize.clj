@@ -7,7 +7,7 @@
 
 (def main-cog
   "The main-cog of any ABS-trace is identified by the following value."
-  [0])
+  [-1])
 
 (defn atomic-sections-by-node [sections]
   (let [by-sections (group-by :atomic/node sections)]
@@ -18,7 +18,7 @@
                        :atomic/disables
                        :atomic/future-id]}]
   (let [await-events (set/union enables disables)
-        await-futs (map atomic/fut-id await-events)]
+        await-futs (map :abs/stable_id await-events)]
     ((set await-futs) future-id)))
 
 (defn make-phandom-section [{:keys [:atomic/node
@@ -67,10 +67,10 @@
 
 (defn update-disabled [{:keys [schedule-counters disabled] :as state}
                        {:keys [:atomic/node :atomic/enables :atomic/disables]}]
-  (let [efuts (set (map atomic/fut-id enables))
+  (let [efuts (set (map :abs/stable_id enables))
         removed (set (filter (fn [[_ _ fut _]] (efuts fut)) disabled))
         added (set (for [ev disables
-                         :let [fut (atomic/fut-id ev)
+                         :let [fut (:abs/stable_id ev)
                                i (schedule-counters fut)]]
                      [node :schedule fut i]))]
     (-> state
@@ -78,7 +78,7 @@
         (update :disabled set/union added))))
 
 (defn is-enabled? [{:keys [mhb seen disabled]}
-                   {:keys [:atomic/uniq-id :atomic/future-id]}]
+                   {:keys [:atomic/uniq-id]}]
   (and (empty? (set/difference (mhb uniq-id) seen))
        (not (disabled uniq-id))))
 
@@ -112,7 +112,7 @@
                                   :atomic/disables]}]
   (let [events (into enables disables)
         new-read-writes (-> (fn [rw event]
-                              (let [fut (atomic/fut-id event)
+                              (let [fut (:abs/stable_id event)
                                     s (schedule-counters fut)
                                     uniq [node :schedule fut s]]
                                 (update-in rw [uniq :reads]
@@ -156,10 +156,9 @@
         (assoc t node (mapv #(dissoc % :atomic/node) local-trace)))
       (reduce-kv {} (group-by :atomic/node linearization))))
 
-(defn uniq-id->event [[node sync-type [caller_id local_id] _]]
+(defn uniq-id->event [[node sync-type future-id _]]
   {:abs/type sync-type
-   :abs/caller_id caller_id
-   :abs/local_id local_id})
+   :abs/stable_id future-id})
 
 (defn exo-trace->abs-trace [exo-trace]
   (-> (fn [trace [node & _ :as uniq]]
