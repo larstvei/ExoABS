@@ -21,10 +21,10 @@
     :validate [#(< 0 % 20000) "Must be a number between 0 and 20000"]]
 
    ["-b" "--backtracking SET" "The backtracking set used"
-    :default :backsets
+    :default :source
     :parse-fn keyword
-    :validate [#{:backsets :sleep-only :naive}
-               "Must be 'backsets', 'sleep-only' or 'naive'"]]
+    :validate [#{:optimal :source :naive}
+               "Must be 'optimal', 'source' or 'naive'"]]
 
    ["-h" "--help"]])
 
